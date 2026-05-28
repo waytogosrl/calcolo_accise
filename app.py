@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from parser_v3 import (
+from parser_v5 import (
     RateRule,
     parse_folder,
     parse_tedb_html_text,
@@ -51,8 +51,6 @@ def select_best_rule(rules: list[dict], country: str, product: str, subtype: str
     matches = [r for r in candidates if matches_abv(r, abv)]
     if not matches:
         return None
-
-    # Prefer exact ABV-ranged rules, then standard/reduced specificity.
     matches.sort(key=lambda r: (
         r.get("abv_from") is None and r.get("abv_to") is None,
         0 if "reduced" in (r.get("rate_type") or "").lower() else 1,
@@ -74,18 +72,14 @@ def range_label(r: dict) -> str:
 def main():
     st.set_page_config(page_title="Calcolatore accise UE", layout="wide")
     st.title("Calcolatore accise UE da HTML TEDB")
-    st.caption("Parser v3: legge le tabelle TEDB, elimina falsi 0 EUR da intestazione, gestisce Standard/Reduced rate e fasce ABV.")
+    st.caption("Parser v5: include birra, vino, fermentati, intermedi ed etilico. Per la birra il campo “Grado/parametro” può essere ABV o °Plato secondo l’unità mostrata.")
 
     repo_rules = load_rates_from_repo()
 
     with st.sidebar:
         st.header("Dati aliquote")
         st.write(f"Aliquote nel repository: **{len(repo_rules)}**")
-        uploaded = st.file_uploader(
-            "Carica HTML TEDB aggiuntivi",
-            type=["html", "htm"],
-            accept_multiple_files=True,
-        )
+        uploaded = st.file_uploader("Carica HTML TEDB aggiuntivi", type=["html", "htm"], accept_multiple_files=True)
         use_uploaded_only = st.checkbox("Usa solo i file caricati qui", value=False)
         if st.button("Ricarica dati repository"):
             st.cache_data.clear()
@@ -107,26 +101,20 @@ def main():
     countries = sorted({r["country"] for r in rules})
 
     st.subheader("Inserimento prodotto")
-
     c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.8, 1.1, 0.9, 0.9, 1])
 
     with c1:
         country = st.selectbox("Destinazione", countries)
-
     products = sorted({r["product"] for r in rules if r["country"] == country})
     with c2:
         product = st.selectbox("Tipologia prodotto", products)
-
     subtypes = sorted({r["subtype"] for r in rules if r["country"] == country and r["product"] == product})
     with c3:
         subtype = st.selectbox("Sottotipo", subtypes)
-
     with c4:
         abv = st.number_input("Grado / parametro", min_value=0.0, value=12.0, step=0.1, format="%.2f")
-
     with c5:
         bottles = st.number_input("N. bottiglie", min_value=0.0, value=1.0, step=1.0, format="%.2f")
-
     with c6:
         liters_per_bottle = st.number_input("Litri/bottiglia", min_value=0.0, value=0.75, step=0.05, format="%.3f")
 
@@ -137,6 +125,10 @@ def main():
             f"Aliquota selezionata: **{rule['rate_eur']:.4f} {rule['unit']}** | "
             f"Fascia: **{range_label(rule)}** | Tipo: **{rule.get('rate_type','')}** | Fonte: `{rule['source_file']}`"
         )
+        if rule.get("unit") == "EUR/hl_per_plato":
+            st.warning("Per questa birra TEDB usa °Plato: inserisci il valore °Plato nel campo Grado/parametro.")
+        elif rule.get("unit") == "EUR/hl_per_alcohol_degree":
+            st.warning("Per questa birra TEDB usa €/hl/°Alcohol: inserisci il grado alcolico nel campo Grado/parametro.")
         if rule.get("note"):
             st.caption(f"Nota: {rule['note']}")
     else:
@@ -165,45 +157,27 @@ def main():
                     "Fonte": rule["source_file"],
                 })
                 st.rerun()
-
     with clear_col:
         if st.button("Svuota prodotti"):
             st.session_state.cart = []
             st.rerun()
 
     st.subheader("Prodotti da calcolare")
-
     if st.session_state.cart:
         cart_df = pd.DataFrame(st.session_state.cart)
         st.dataframe(cart_df, use_container_width=True, hide_index=True)
-        total = cart_df["Accisa EUR"].sum()
-        st.metric("Totale accise", f"{total:.2f} €")
-        st.download_button(
-            "Scarica calcolo CSV",
-            data=cart_df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-            file_name="calcolo_accise.csv",
-            mime="text/csv",
-        )
+        st.metric("Totale accise", f"{cart_df['Accisa EUR'].sum():.2f} €")
+        st.download_button("Scarica calcolo CSV", data=cart_df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"), file_name="calcolo_accise.csv", mime="text/csv")
     else:
         st.write("Nessun prodotto aggiunto.")
 
     st.divider()
     st.subheader("Aliquote importate")
-
     df = pd.DataFrame(rules)
-    preferred_cols = [
-        "country", "product", "subtype", "rate_eur", "unit",
-        "abv_from", "abv_to", "vat", "rate_type", "source_file", "note"
-    ]
+    preferred_cols = ["country", "product", "subtype", "rate_eur", "unit", "abv_from", "abv_to", "vat", "rate_type", "source_file", "note"]
     df = df[[c for c in preferred_cols if c in df.columns]]
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Scarica database aliquote CSV",
-        data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-        file_name="aliquote_importate_v3.csv",
-        mime="text/csv",
-    )
+    st.download_button("Scarica database aliquote CSV", data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"), file_name="aliquote_importate_v4.csv", mime="text/csv")
 
 
 if __name__ == "__main__":
