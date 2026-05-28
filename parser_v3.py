@@ -30,36 +30,20 @@ class RateRule:
 
 
 COUNTRY_ALIASES = {
-    "austria": "Austria",
-    "belgio": "Belgio",
-    "be": "Belgio",
-    "germania": "Germania",
-    "de": "Germania",
-    "francia": "Francia",
-    "france": "Francia",
-    "fr": "Francia",
-    "svezia": "Svezia",
-    "se": "Svezia",
-    "paesi bassi": "Paesi Bassi",
-    "netherlands": "Paesi Bassi",
-    "nl": "Paesi Bassi",
-    "danimarca": "Danimarca",
-    "denmark": "Danimarca",
-    "dk": "Danimarca",
-    "finlandia": "Finlandia",
-    "finland": "Finlandia",
-    "fi": "Finlandia",
-    "lituania": "Lituania",
-    "lussemburgo": "Lussemburgo",
-    "rep ceca": "Rep Ceca",
-    "slovacchia": "Slovacchia",
-    "slovenia": "Slovenia",
-    "spagna": "Spagna",
+    "austria": "Austria", "belgio": "Belgio", "be": "Belgio",
+    "germania": "Germania", "de": "Germania",
+    "francia": "Francia", "france": "Francia", "fr": "Francia",
+    "svezia": "Svezia", "se": "Svezia",
+    "paesi bassi": "Paesi Bassi", "netherlands": "Paesi Bassi", "nl": "Paesi Bassi",
+    "danimarca": "Danimarca", "denmark": "Danimarca", "dk": "Danimarca",
+    "finlandia": "Finlandia", "finland": "Finlandia", "fi": "Finlandia",
+    "lituania": "Lituania", "lussemburgo": "Lussemburgo",
+    "rep ceca": "Rep Ceca", "slovacchia": "Slovacchia",
+    "slovenia": "Slovenia", "spagna": "Spagna",
 }
 
 
 SECTION_MAP = {
-    "beer-tables": ("Beer", "Beer"),
     "wines-tables": ("Wine", "Wine"),
     "fermented-tables": ("Fermented beverages other than wine and beer", "Fermented beverages other than wine and beer"),
     "intermediate-tables": ("Intermediate products", "Intermediate products"),
@@ -93,11 +77,10 @@ def clean_number(text: str) -> Optional[float]:
 
 
 def is_rate_line(line: str) -> bool:
-    # Rigore importante: "Per hl (min. 0 EUR)" non deve mai essere una riga aliquota.
     if not line:
         return False
     lower = line.lower()
-    if "min." in lower or "minimum" in lower or "per hl" in lower or "per °" in lower:
+    if "min." in lower or "minimum" in lower or "per hl" in lower or "per °" in lower or ">= " in lower:
         return False
     return bool(re.fullmatch(r"\s*\d[\d\s.,']*\s*EUR\s*", line.strip(), flags=re.I))
 
@@ -151,19 +134,15 @@ def title_cap_abv(line: str) -> Tuple[Optional[float], Optional[float]]:
 
 def infer_bounds_from_note(note: str) -> Tuple[Optional[float], Optional[float]]:
     t = (note or "").lower().replace(",", ".").replace("≤", "<=").replace("≥", ">=")
-    # <= 8.5, <=15
     m = re.search(r"<=\s*([0-9]+(?:\.[0-9]+)?)\s*%", t)
     if m:
         return None, float(m.group(1))
-    # >8.5 or above 8.5
     m = re.search(r"(?:>|above|more than)\s*([0-9]+(?:\.[0-9]+)?)\s*%", t)
     if m:
         return float(m.group(1)), None
-    # < 6 % vol. — keep as note only; TEDB title is normally stronger for reduced blocks.
     m = re.search(r"<\s*([0-9]+(?:\.[0-9]+)?)\s*%", t)
     if m:
         return None, float(m.group(1))
-    # "above 2.25 but not more than 4.5%"
     nums = [float(x) for x in re.findall(r"[0-9]+(?:\.[0-9]+)?", t)]
     if "above" in t and ("not more than" in t or "not exceeding" in t) and len(nums) >= 2:
         return nums[0], nums[1]
@@ -171,13 +150,11 @@ def infer_bounds_from_note(note: str) -> Tuple[Optional[float], Optional[float]]
 
 
 def infer_bounds_from_percents(percent_values: List[float], block_abv_to: Optional[float], note: str, rate_type: str) -> Tuple[Optional[float], Optional[float]]:
-    # percent_values are after VAT, therefore ABV candidates only.
     if len(percent_values) >= 2:
         return percent_values[0], percent_values[1]
 
     nlo, nhi = infer_bounds_from_note(note)
     if nlo is not None or nhi is not None:
-        # In reduced blocks, if note says <6 but title says <=8.5, keep the official block cap unless note is the only clue.
         if block_abv_to is not None and "reduced" in rate_type.lower() and nhi is not None and abs(nhi - block_abv_to) > 1e-9:
             return nlo, block_abv_to
         return nlo, nhi
@@ -185,9 +162,7 @@ def infer_bounds_from_percents(percent_values: List[float], block_abv_to: Option
     if len(percent_values) == 1:
         value = percent_values[0]
         if block_abv_to is not None and "reduced" in rate_type.lower():
-            # Example Netherlands reduced: only "8.5%" means <=8.5.
             return None, value
-        # Example Netherlands standard: only "8.51%" and note >8.5.
         return value, None
 
     if block_abv_to is not None and "reduced" in rate_type.lower():
@@ -210,26 +185,32 @@ def detect_unit(section_text: str, product: str) -> str:
     return "EUR/hl"
 
 
-def parse_entries_for_subtype(
-    lines: List[str],
-    start_i: int,
-    stop_markers: Iterable[str],
-    block_type: str,
-    block_abv_to: Optional[float],
-    default_subtype: str,
-    country: str,
-    product: str,
-    unit: str,
-    source_file: str,
-) -> Tuple[List[RateRule], int]:
+def split_blocks(lines: List[str]) -> List[Tuple[str, List[str]]]:
+    blocks: List[Tuple[str, List[str]]] = []
+    current_type = None
+    current_lines: List[str] = []
+    for line in lines:
+        bt = block_type_from_line(line)
+        if bt:
+            if current_type is not None:
+                blocks.append((current_type, current_lines))
+            current_type = bt
+            current_lines = [line]
+        else:
+            if current_type is not None:
+                current_lines.append(line)
+    if current_type is not None:
+        blocks.append((current_type, current_lines))
+    return blocks
+
+
+def parse_entries_for_subtype(lines, start_i, stop_markers, block_type, block_abv_to, default_subtype, country, product, unit, source_file):
     rules: List[RateRule] = []
     i = start_i
-
     while i < len(lines):
         line = lines[i]
         if line in stop_markers or block_type_from_line(line):
             break
-
         rate = parse_rate_line(line)
         if rate is None:
             i += 1
@@ -253,69 +234,26 @@ def parse_entries_for_subtype(
         while i < len(lines):
             if lines[i] in stop_markers or block_type_from_line(lines[i]) or is_rate_line(lines[i]):
                 break
-            # include useful non-header text
             if "additional information" not in lines[i].lower():
                 note_parts.append(lines[i])
             i += 1
 
         note = " | ".join(note_parts).strip()
         abv_from, abv_to = infer_bounds_from_percents(abv_values, block_abv_to, note, block_type)
-
-        # If line note says <= 8.5, respect it if no explicit bounds.
         if abv_from is None and abv_to is None:
             nlo, nhi = infer_bounds_from_note(note)
             abv_from, abv_to = nlo, nhi
 
-        rules.append(
-            RateRule(
-                country=country,
-                product=product,
-                subtype=default_subtype,
-                rate_eur=rate,
-                unit=unit,
-                abv_from=abv_from,
-                abv_to=abv_to,
-                vat=vat,
-                rate_type=block_type,
-                source_file=source_file,
-                note=note,
-            )
-        )
-
+        rules.append(RateRule(country, product, default_subtype, rate, unit, abv_from, abv_to, vat, block_type, source_file, note))
     return rules, i
-
-
-def split_blocks(lines: List[str]) -> List[Tuple[str, List[str]]]:
-    blocks: List[Tuple[str, List[str]]] = []
-    current_type = None
-    current_lines: List[str] = []
-
-    for line in lines:
-        bt = block_type_from_line(line)
-        if bt:
-            if current_type is not None:
-                blocks.append((current_type, current_lines))
-            current_type = bt
-            current_lines = [line]
-        else:
-            if current_type is not None:
-                current_lines.append(line)
-
-    if current_type is not None:
-        blocks.append((current_type, current_lines))
-
-    return blocks
 
 
 def parse_section_lines(lines: List[str], country: str, product: str, source_file: str) -> List[RateRule]:
     if not lines:
         return []
-
     section_text = " ".join(lines)
     unit = detect_unit(section_text, product)
     rules: List[RateRule] = []
-
-    # Tables for wine-like products have Still/Sparkling. Beer and ethyl usually do not.
     has_subtypes = any(x in lines for x in ("Still", "Sparkling"))
 
     for block_type, block_lines in split_blocks(lines):
@@ -323,22 +261,12 @@ def parse_section_lines(lines: List[str], country: str, product: str, source_fil
         if has_subtypes:
             stop_markers = {"Still", "Sparkling"}
             i = 0
-            current_subtype = None
             while i < len(block_lines):
                 line = block_lines[i]
                 if line in stop_markers:
-                    current_subtype = line
                     parsed, new_i = parse_entries_for_subtype(
-                        block_lines,
-                        i + 1,
-                        stop_markers,
-                        block_type,
-                        block_abv_to,
-                        current_subtype,
-                        country,
-                        product,
-                        unit,
-                        source_file,
+                        block_lines, i + 1, stop_markers, block_type, block_abv_to,
+                        line, country, product, unit, source_file
                     )
                     rules.extend(parsed)
                     i = max(new_i, i + 1)
@@ -352,32 +280,157 @@ def parse_section_lines(lines: List[str], country: str, product: str, source_fil
                 subtype = "Small producer"
             elif "reduced" in block_type.lower():
                 subtype = "Reduced"
-
-            parsed, _ = parse_entries_for_subtype(
-                block_lines,
-                0,
-                set(),
-                block_type,
-                block_abv_to,
-                subtype,
-                country,
-                product,
-                unit,
-                source_file,
-            )
+            parsed, _ = parse_entries_for_subtype(block_lines, 0, set(), block_type, block_abv_to, subtype, country, product, unit, source_file)
             rules.extend(parsed)
 
     postprocess_ranges(rules)
     return deduplicate(rules)
 
 
+def parse_beer_lines(lines: List[str], country: str, source_file: str) -> List[RateRule]:
+    if not lines:
+        return []
+
+    text = " ".join(lines).lower()
+    unit = "EUR/hl_per_plato" if "°plato" in text else "EUR/hl_per_alcohol_degree"
+    rules: List[RateRule] = []
+
+    for block_type, block_lines in split_blocks(lines):
+        _, block_abv_to = title_cap_abv(block_type)
+
+        subtype = "Standard"
+        if "low alcohol" in block_type.lower():
+            subtype = "Low alcohol"
+        elif "independent small" in block_type.lower() or "small breweries" in block_type.lower():
+            subtype = "Small brewery"
+        elif "reduced" in block_type.lower():
+            subtype = "Reduced"
+
+        i = 0
+        while i < len(block_lines):
+            rate = parse_rate_line(block_lines[i])
+            if rate is None:
+                i += 1
+                continue
+
+            vat = None
+            if i + 1 < len(block_lines) and is_percent_line(block_lines[i + 1]):
+                vat = parse_percent_line(block_lines[i + 1])
+                i += 2
+            else:
+                i += 1
+
+            percents = []
+            while i < len(block_lines) and is_percent_line(block_lines[i]):
+                v = parse_percent_line(block_lines[i])
+                if v is not None:
+                    percents.append(v)
+                i += 1
+
+            note_parts = []
+            while i < len(block_lines):
+                if block_type_from_line(block_lines[i]) or is_rate_line(block_lines[i]):
+                    break
+                # Stop when a non-rate structural subheading starts; keep notes otherwise.
+                if block_lines[i] in {"Applicable for Independent small breweries only"}:
+                    break
+                if "additional information" not in block_lines[i].lower():
+                    note_parts.append(block_lines[i])
+                i += 1
+
+            note = " | ".join(note_parts).strip()
+            abv_from, abv_to = infer_bounds_from_percents(percents, block_abv_to, note, block_type)
+
+            rules.append(RateRule(
+                country=country,
+                product="Beer",
+                subtype=subtype,
+                rate_eur=rate,
+                unit=unit,
+                abv_from=abv_from,
+                abv_to=abv_to,
+                vat=vat,
+                rate_type=block_type,
+                source_file=source_file,
+                note=note,
+            ))
+
+            # For beer, usually the first standard/low-alcohol rate is the main one. 
+            # Avoid parsing long small-brewery tables unless explicitly captured as Small brewery block.
+            if subtype in {"Standard", "Low alcohol"}:
+                break
+
+    return deduplicate(rules)
+
+
+def parse_ethanol_lines(lines: List[str], country: str, source_file: str) -> List[RateRule]:
+    """
+    Parser dedicato per Ethyl alcohol / spirits.
+    TEDB qui non usa Still/Sparkling: ogni blocco contiene una o più aliquote seguite da VAT e note.
+    Base di calcolo: EUR/hl_pure_alcohol.
+    """
+    unit = "EUR/hl_pure_alcohol"
+    rules: List[RateRule] = []
+
+    for block_type, block_lines in split_blocks(lines):
+        subtype = "Standard"
+        if "small distilleries" in block_type.lower():
+            subtype = "Small distillery"
+        elif "low strength" in block_type.lower():
+            subtype = "Low strength / particular regions"
+        elif "reduced" in block_type.lower():
+            subtype = "Reduced"
+
+        # Salta la riga titolo del blocco; poi cerca tutte le aliquote vere.
+        i = 1 if block_lines and block_type_from_line(block_lines[0]) else 0
+
+        while i < len(block_lines):
+            rate = parse_rate_line(block_lines[i])
+            if rate is None:
+                i += 1
+                continue
+
+            vat = None
+            if i + 1 < len(block_lines) and is_percent_line(block_lines[i + 1]):
+                vat = parse_percent_line(block_lines[i + 1])
+                i += 2
+            else:
+                i += 1
+
+            note_parts = []
+            while i < len(block_lines):
+                if is_rate_line(block_lines[i]) or block_type_from_line(block_lines[i]):
+                    break
+                if "additional information" not in block_lines[i].lower():
+                    note_parts.append(block_lines[i])
+                i += 1
+
+            note = " | ".join(note_parts).strip()
+            abv_from, abv_to = infer_bounds_from_note(note)
+
+            rules.append(
+                RateRule(
+                    country=country,
+                    product="Ethyl alcohol / spirits",
+                    subtype=subtype,
+                    rate_eur=rate,
+                    unit=unit,
+                    abv_from=abv_from,
+                    abv_to=abv_to,
+                    vat=vat,
+                    rate_type=block_type,
+                    source_file=source_file,
+                    note=note,
+                )
+            )
+
+    return deduplicate(rules)
+
+
 def postprocess_ranges(rules: List[RateRule]) -> None:
-    # If a reduced rule has an upper cap and a standard rule for same country/product/subtype has no range,
-    # standard becomes > cap. This fixes Belgium/Germany style reduced blocks.
     by_key: Dict[Tuple[str, str, str], List[RateRule]] = {}
     for r in rules:
         by_key.setdefault((r.country, r.product, r.subtype), []).append(r)
-
     for key, group in by_key.items():
         caps = [r.abv_to for r in group if r.abv_to is not None and "reduced" in r.rate_type.lower()]
         if not caps:
@@ -389,13 +442,9 @@ def postprocess_ranges(rules: List[RateRule]) -> None:
                 if r.note:
                     r.note += " | "
                 r.note += f"Standard rate inferred as > {cap:g}% because a reduced rate exists up to {cap:g}%."
-
-    # If a standard rule contains a single lower boundary like 8.51, convert to practical > 8.5 when appropriate.
     for r in rules:
-        if r.abv_from is not None and r.abv_to is None:
-            # normalize common "8.51" -> 8.5 for matching at 8.50/8.51 boundaries
-            if abs(r.abv_from - 8.51) < 1e-9:
-                r.abv_from = 8.5
+        if r.abv_from is not None and r.abv_to is None and abs(r.abv_from - 8.51) < 1e-9:
+            r.abv_from = 8.5
 
 
 def deduplicate(rules: List[RateRule]) -> List[RateRule]:
@@ -411,11 +460,20 @@ def parse_tedb_html_text(filename: str, raw_html: str) -> List[RateRule]:
     country = country_from_file(filename)
     rules: List[RateRule] = []
 
+    # Beer dedicated parser
+    beer_nodes = soup.find_all(attrs={"data-testid": "beer-tables"})
+    for section in beer_nodes:
+        rules.extend(parse_beer_lines(normalize_lines(section), country, filename))
+
+    # Wine-like and intermediate sections
     for testid, (_, product) in SECTION_MAP.items():
         section_nodes = soup.find_all(attrs={"data-testid": testid})
         for section in section_nodes:
             lines = normalize_lines(section)
-            rules.extend(parse_section_lines(lines, country, product, filename))
+            if testid == "ethyl-tables":
+                rules.extend(parse_ethanol_lines(lines, country, filename))
+            else:
+                rules.extend(parse_section_lines(lines, country, product, filename))
 
     return deduplicate(rules)
 
@@ -438,13 +496,10 @@ def parse_folder(folder: Path) -> List[RateRule]:
 def matches_abv(rule: dict | RateRule, abv: float) -> bool:
     lo = rule.abv_from if isinstance(rule, RateRule) else rule.get("abv_from")
     hi = rule.abv_to if isinstance(rule, RateRule) else rule.get("abv_to")
-
     if lo is None and hi is None:
         return True
-
-    lo_ok = True if lo is None else abv > float(lo) + 1e-9 or abs(abv - float(lo)) < 1e-9 and float(lo) == 0
+    lo_ok = True if lo is None else (abv > float(lo) + 1e-9 or (abs(abv - float(lo)) < 1e-9 and float(lo) == 0))
     hi_ok = True if hi is None else abv <= float(hi) + 1e-9
-
     return lo_ok and hi_ok
 
 
@@ -455,10 +510,8 @@ def calculate_excise(rule: dict | RateRule, bottles: float, liters_per_bottle: f
     else:
         unit = rule["unit"]
         rate = float(rule["rate_eur"])
-
     total_liters = bottles * liters_per_bottle
     hl = total_liters / 100.0
-
     if unit == "EUR/hl":
         excise = hl * rate
     elif unit in {"EUR/hl_per_alcohol_degree", "EUR/hl_per_plato"}:
@@ -468,7 +521,6 @@ def calculate_excise(rule: dict | RateRule, bottles: float, liters_per_bottle: f
         excise = pure_alcohol_hl * rate
     else:
         raise ValueError(f"Unità non supportata: {unit}")
-
     return total_liters, excise
 
 
